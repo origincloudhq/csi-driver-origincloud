@@ -7,14 +7,23 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
+// identity is the CSI Identity service, which both plugins serve.
+type identity struct {
+	csi.UnimplementedIdentityServer
+
+	version string
+}
+
 // GetPluginInfo names the driver.
-func (d *Driver) GetPluginInfo(context.Context, *csi.GetPluginInfoRequest) (*csi.GetPluginInfoResponse, error) {
-	return &csi.GetPluginInfoResponse{Name: Name, VendorVersion: d.cfg.Version}, nil
+func (i identity) GetPluginInfo(context.Context, *csi.GetPluginInfoRequest) (*csi.GetPluginInfoResponse, error) {
+	return &csi.GetPluginInfoResponse{Name: Name, VendorVersion: i.version}, nil
 }
 
 // GetPluginCapabilities says the driver has a controller service and that
-// its volumes are reachable only from nodes in their zone.
-func (d *Driver) GetPluginCapabilities(context.Context, *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
+// its volumes are reachable only from nodes in their zone. The node plugin
+// answers the same: the capabilities are the driver's, whichever plugin
+// is asked.
+func (identity) GetPluginCapabilities(context.Context, *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
 	service := func(t csi.PluginCapability_Service_Type) *csi.PluginCapability {
 		return &csi.PluginCapability{Type: &csi.PluginCapability_Service_{
 			Service: &csi.PluginCapability_Service{Type: t},
@@ -26,8 +35,8 @@ func (d *Driver) GetPluginCapabilities(context.Context, *csi.GetPluginCapabiliti
 	}}, nil
 }
 
-// Probe answers ready: the controller holds no state to warm up, and a
-// failing API shows in the calls themselves.
-func (d *Driver) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, error) {
+// Probe answers ready: neither plugin holds state to warm up, and a
+// failing API or node shows in the calls themselves.
+func (identity) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, error) {
 	return &csi.ProbeResponse{Ready: wrapperspb.Bool(true)}, nil
 }

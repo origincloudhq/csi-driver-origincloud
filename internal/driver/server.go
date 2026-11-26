@@ -39,12 +39,27 @@ func Listen(endpoint string) (net.Listener, error) {
 	return nil, fmt.Errorf("endpoint %q: the scheme must be unix or tcp", endpoint)
 }
 
-// Serve serves the driver's Identity and Controller services on l until
-// ctx ends, then stops gracefully.
+// Serve serves the controller plugin's Identity and Controller services on
+// l until ctx ends, then stops gracefully.
 func (d *Driver) Serve(ctx context.Context, l net.Listener) error {
+	return serve(ctx, l, func(srv *grpc.Server) {
+		csi.RegisterIdentityServer(srv, d)
+		csi.RegisterControllerServer(srv, d)
+	})
+}
+
+// Serve serves the node plugin's Identity and Node services on l until ctx
+// ends, then stops gracefully.
+func (n *Node) Serve(ctx context.Context, l net.Listener) error {
+	return serve(ctx, l, func(srv *grpc.Server) {
+		csi.RegisterIdentityServer(srv, n)
+		csi.RegisterNodeServer(srv, n)
+	})
+}
+
+func serve(ctx context.Context, l net.Listener, register func(*grpc.Server)) error {
 	srv := grpc.NewServer(grpc.UnaryInterceptor(logCalls))
-	csi.RegisterIdentityServer(srv, d)
-	csi.RegisterControllerServer(srv, d)
+	register(srv)
 	stopped := make(chan struct{})
 	go func() {
 		select {
@@ -64,7 +79,7 @@ func logCalls(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler 
 	switch {
 	case err != nil:
 		slog.WarnContext(ctx, "call failed", "method", method, "error", err)
-	case !strings.HasPrefix(method, "Get") && method != "Probe" && !strings.HasSuffix(method, "Capabilities"):
+	case !strings.HasPrefix(method, "Get") && !strings.HasPrefix(method, "NodeGet") && method != "Probe" && !strings.HasSuffix(method, "Capabilities"):
 		slog.InfoContext(ctx, "call", "method", method)
 	}
 	return resp, err
