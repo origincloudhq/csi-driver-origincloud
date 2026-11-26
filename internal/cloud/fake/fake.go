@@ -2,8 +2,10 @@
 // controller calls, for unit tests and the csi-sanity suite. It keeps the
 // API's observable behavior the driver relies on: a repeated request id
 // returns the first request's operation, an in-use volume can't be deleted,
-// a volume is attached to at most one instance, and errors carry the
-// platform's reasons.
+// a volume is attached to at most one instance, a volume is created only
+// from a protected snapshot and never shrinks, a snapshot is deleted only
+// once unprotected and unprotected only once no volume comes from it, and
+// errors carry the platform's reasons.
 package fake
 
 import (
@@ -25,6 +27,7 @@ import (
 type Cloud struct {
 	mu          sync.Mutex
 	volumes     map[string]*pvsv1beta1.Volume
+	snapshots   map[string]*pvsv1beta1.Snapshot
 	instances   map[string]*computev1beta1.Instance
 	attachments map[string]*computev1beta1.VolumeAttachment
 	// requests maps a request id to the result its first request had, so
@@ -47,6 +50,7 @@ type Cloud struct {
 func New() *Cloud {
 	return &Cloud{
 		volumes:     map[string]*pvsv1beta1.Volume{},
+		snapshots:   map[string]*pvsv1beta1.Snapshot{},
 		instances:   map[string]*computev1beta1.Instance{},
 		attachments: map[string]*computev1beta1.VolumeAttachment{},
 		requests:    map[string]any{},
@@ -56,7 +60,7 @@ func New() *Cloud {
 
 // Cloud returns the fake as the driver's cloud.Cloud.
 func (c *Cloud) Cloud() cloud.Cloud {
-	return cloud.Cloud{Volumes: volumes{c}, Instances: instances{c}, Attachments: attachments{c}}
+	return cloud.Cloud{Volumes: volumes{c}, Snapshots: snapshots{c}, Instances: instances{c}, Attachments: attachments{c}}
 }
 
 // AddInstance adds a running instance, `projects/{project}/zones/{zone}/instances/{id}`.
@@ -224,6 +228,9 @@ func (v volumes) CreateVolume(_ context.Context, req *pvsv1beta1.CreateVolumeReq
 	}
 	if req.GetVolume().GetSizeGib() < 1 {
 		return nil, Error("BAD_REQUEST", "invalid input on field sizeGib: must be at least 1")
+	}
+	if err := c.checkSource(req.GetParent(), req.GetVolume()); err != nil {
+		return nil, err
 	}
 	vol := proto.Clone(req.GetVolume()).(*pvsv1beta1.Volume)
 	vol.Name = req.GetParent() + "/volumes/" + c.id("vol")

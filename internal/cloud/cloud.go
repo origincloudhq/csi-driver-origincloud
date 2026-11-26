@@ -1,5 +1,6 @@
 // Package cloud is the driver's view of the Origin Cloud API: the calls the
-// controller makes on PVS volumes and on compute volume attachments, as
+// controller makes on PVS volumes and snapshots and on compute volume
+// attachments, as
 // interfaces the driver depends on, and their implementation over
 // go.origincloud.eu/sdk.
 //
@@ -30,7 +31,19 @@ type Volumes interface {
 	GetVolume(ctx context.Context, req *pvsv1beta1.GetVolumeRequest) (*pvsv1beta1.Volume, error)
 	AllVolumes(ctx context.Context, req *pvsv1beta1.ListVolumesRequest) iter.Seq2[*pvsv1beta1.Volume, error]
 	CreateVolume(ctx context.Context, req *pvsv1beta1.CreateVolumeRequest) (Operation[*pvsv1beta1.Volume], error)
+	UpdateVolume(ctx context.Context, req *pvsv1beta1.UpdateVolumeRequest) (Operation[*pvsv1beta1.Volume], error)
 	DeleteVolume(ctx context.Context, req *pvsv1beta1.DeleteVolumeRequest) (Operation[*emptypb.Empty], error)
+}
+
+// Snapshots are PVS snapshots. A volume is created only from a protected
+// snapshot, and a snapshot is deleted only once unprotected.
+type Snapshots interface {
+	GetSnapshot(ctx context.Context, req *pvsv1beta1.GetSnapshotRequest) (*pvsv1beta1.Snapshot, error)
+	AllSnapshots(ctx context.Context, req *pvsv1beta1.ListSnapshotsRequest) iter.Seq2[*pvsv1beta1.Snapshot, error]
+	CreateSnapshot(ctx context.Context, req *pvsv1beta1.CreateSnapshotRequest) (Operation[*pvsv1beta1.Snapshot], error)
+	DeleteSnapshot(ctx context.Context, req *pvsv1beta1.DeleteSnapshotRequest) (Operation[*emptypb.Empty], error)
+	ProtectSnapshot(ctx context.Context, req *pvsv1beta1.ProtectSnapshotRequest) (Operation[*pvsv1beta1.Snapshot], error)
+	UnprotectSnapshot(ctx context.Context, req *pvsv1beta1.UnprotectSnapshotRequest) (Operation[*pvsv1beta1.Snapshot], error)
 }
 
 // Instances are compute instances; the controller only reads them.
@@ -50,6 +63,7 @@ type Attachments interface {
 // Cloud bundles the APIs the controller calls.
 type Cloud struct {
 	Volumes     Volumes
+	Snapshots   Snapshots
 	Instances   Instances
 	Attachments Attachments
 }
@@ -58,6 +72,7 @@ type Cloud struct {
 func New(client *core.Client) Cloud {
 	return Cloud{
 		Volumes:     sdkVolumes{pvsv1beta1.NewVolumeClient(client)},
+		Snapshots:   sdkSnapshots{pvsv1beta1.NewSnapshotClient(client)},
 		Instances:   computev1beta1.NewInstanceClient(client),
 		Attachments: sdkAttachments{computev1beta1.NewVolumeAttachmentClient(client)},
 	}
@@ -75,8 +90,51 @@ func (v sdkVolumes) CreateVolume(ctx context.Context, req *pvsv1beta1.CreateVolu
 	return op, nil
 }
 
+func (v sdkVolumes) UpdateVolume(ctx context.Context, req *pvsv1beta1.UpdateVolumeRequest) (Operation[*pvsv1beta1.Volume], error) {
+	op, err := v.VolumeClient.UpdateVolume(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return op, nil
+}
+
 func (v sdkVolumes) DeleteVolume(ctx context.Context, req *pvsv1beta1.DeleteVolumeRequest) (Operation[*emptypb.Empty], error) {
 	op, err := v.VolumeClient.DeleteVolume(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return op, nil
+}
+
+// sdkSnapshots adapts the SDK's snapshot client to Snapshots.
+type sdkSnapshots struct{ *pvsv1beta1.SnapshotClient }
+
+func (s sdkSnapshots) CreateSnapshot(ctx context.Context, req *pvsv1beta1.CreateSnapshotRequest) (Operation[*pvsv1beta1.Snapshot], error) {
+	op, err := s.SnapshotClient.CreateSnapshot(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return op, nil
+}
+
+func (s sdkSnapshots) DeleteSnapshot(ctx context.Context, req *pvsv1beta1.DeleteSnapshotRequest) (Operation[*emptypb.Empty], error) {
+	op, err := s.SnapshotClient.DeleteSnapshot(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return op, nil
+}
+
+func (s sdkSnapshots) ProtectSnapshot(ctx context.Context, req *pvsv1beta1.ProtectSnapshotRequest) (Operation[*pvsv1beta1.Snapshot], error) {
+	op, err := s.SnapshotClient.ProtectSnapshot(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return op, nil
+}
+
+func (s sdkSnapshots) UnprotectSnapshot(ctx context.Context, req *pvsv1beta1.UnprotectSnapshotRequest) (Operation[*pvsv1beta1.Snapshot], error) {
+	op, err := s.SnapshotClient.UnprotectSnapshot(ctx, req)
 	if err != nil {
 		return nil, err
 	}

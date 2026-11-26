@@ -34,6 +34,9 @@ func (d *Driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCa
 		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
 		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
 		csi.ControllerServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER,
+		csi.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT,
+		csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS,
+		csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
 	} {
 		caps = append(caps, &csi.ControllerServiceCapability{Type: &csi.ControllerServiceCapability_Rpc{
 			Rpc: &csi.ControllerServiceCapability_RPC{Type: t},
@@ -43,7 +46,10 @@ func (d *Driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCa
 }
 
 // CreateVolume creates a PVS volume in the zone the CO asks for, or
-// returns the one an earlier attempt of the same name created.
+// returns the one an earlier attempt of the same name created. A volume
+// restored from a snapshot is created in the snapshot's zone, at least the
+// snapshot's size. PVS has no clone of a volume, so a volume source is
+// refused.
 //
 // It is idempotent by the CSI volume name twice over: the volume carries
 // the name in a tag, which a retry looks for first, and the create call
@@ -52,17 +58,11 @@ func (d *Driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCa
 // operation rather than a second volume.
 func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	name := req.GetName()
-	if name == "" {
-		return nil, status.Error(codes.InvalidArgument, "the volume name is missing")
-	}
-	if len(name) > 256 || strings.TrimSpace(name) != name {
-		return nil, status.Errorf(codes.InvalidArgument, "the volume name %q can't be stored in a tag: at most 256 characters, no leading or trailing spaces", name)
+	if err := checkName("volume", name); err != nil {
+		return nil, err
 	}
 	if err := checkCapabilities(req.GetVolumeCapabilities()); err != nil {
 		return nil, err
-	}
-	if req.GetVolumeContentSource() != nil {
-		return nil, status.Error(codes.InvalidArgument, "creating a volume from a snapshot or another volume isn't supported yet")
 	}
 	storageClass, err := storageClassOf(req.GetParameters())
 	if err != nil {
@@ -72,11 +72,32 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err != nil {
 		return nil, err
 	}
-	zone, err := d.zoneOf(req.GetAccessibilityRequirements())
-	if err != nil {
-		return nil, err
+	var (
+		zone   string
+		source *pvsv1beta1.Snapshot
+	)
+	switch cs := req.GetVolumeContentSource(); {
+	case cs == nil:
+		if zone, err = d.zoneOf(req.GetAccessibilityRequirements()); err != nil {
+			return nil, err
+		}
+	case cs.GetSnapshot() != nil:
+		if source, zone, err = d.restoreSource(ctx, cs.GetSnapshot().GetSnapshotId(), req.GetAccessibilityRequirements()); err != nil {
+			return nil, err
+		}
+		if sizeGiB, err = restoreSize(sizeGiB, source, req.GetCapacityRange()); err != nil {
+			return nil, err
+		}
+	case cs.GetVolume() != nil:
+		return nil, status.Error(codes.InvalidArgument, "cloning a volume isn't supported: PVS creates a volume only from a snapshot, so snapshot the volume and restore the snapshot")
+	default:
+		return nil, status.Error(codes.InvalidArgument, "the volume content source names neither a snapshot nor a volume")
 	}
 	parent := zonal{Project: d.cfg.Project, Zone: zone}.Parent()
+	sourceName := ""
+	if source != nil {
+		sourceName = pvsFullName(source.GetName())
+	}
 
 	vol, err := d.findVolume(ctx, parent, name)
 	if err != nil {
@@ -86,15 +107,19 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		if !fits(vol, req.GetCapacityRange(), storageClass) {
 			return nil, status.Errorf(codes.AlreadyExists, "volume %q exists as %s with %d GiB of %s, which the request doesn't fit", name, vol.GetName(), vol.GetSizeGib(), vol.GetStorageClass())
 		}
+		if vol.GetSourceSnapshot() != sourceName {
+			return nil, status.Errorf(codes.AlreadyExists, "volume %q exists as %s from snapshot %q, not from %q", name, vol.GetName(), vol.GetSourceSnapshot(), sourceName)
+		}
 	} else {
 		tags := map[string]string{tagVolumeName: name, tagCreatedBy: Name}
 		if len(name) <= 128 {
 			tags["origin:name"] = name
 		}
 		if vol, err = d.createVolume(ctx, parent, name, &pvsv1beta1.Volume{
-			SizeGib:      sizeGiB,
-			StorageClass: storageClass,
-			Tags:         tags,
+			SizeGib:        sizeGiB,
+			StorageClass:   storageClass,
+			SourceSnapshot: sourceName,
+			Tags:           tags,
 		}); err != nil {
 			return nil, err
 		}
@@ -112,7 +137,20 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		AccessibleTopology: []*csi.Topology{{
 			Segments: map[string]string{TopologyZoneKey: z.Zone},
 		}},
+		ContentSource: req.GetVolumeContentSource(),
 	}}, nil
+}
+
+// checkName fails with InvalidArgument unless name is a CSI name the
+// driver can keep in a tag: what a retry finds an earlier attempt by.
+func checkName(kind, name string) error {
+	if name == "" {
+		return status.Errorf(codes.InvalidArgument, "the %s name is missing", kind)
+	}
+	if len(name) > 256 || strings.TrimSpace(name) != name {
+		return status.Errorf(codes.InvalidArgument, "the %s name %q can't be stored in a tag: at most 256 characters, no leading or trailing spaces", kind, name)
+	}
+	return nil
 }
 
 // createVolume creates the volume spec for the CSI name in parent and

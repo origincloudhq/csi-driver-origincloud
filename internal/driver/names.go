@@ -77,3 +77,24 @@ var requestNamespace = uuid.MustParse("8f0f6f43-36a4-5b55-9a0e-6f1d6c1f1c2a")
 func createRequestID(parent, name string) string {
 	return uuid.NewSHA1(requestNamespace, []byte("CreateVolume\x00"+parent+"\x00"+name)).String()
 }
+
+// A snapshot's CSI snapshot ID is the PVS snapshot's relative name,
+// `projects/{project}/zones/{zone}/snapshots/{snapshot}`: the zone a
+// volume restored from it is created in.
+func parseSnapshotID(id string) (zonal, bool) { return parseZonal(id, "snapshots") }
+
+// snapshotRequestID is the request id of the CreateSnapshot call for the
+// CSI snapshot name in parent, the same for every retry.
+func snapshotRequestID(parent, name string) string {
+	return uuid.NewSHA1(requestNamespace, []byte("CreateSnapshot\x00"+parent+"\x00"+name)).String()
+}
+
+// relativeOf is the relative name in a PVS full name, or "" when full
+// isn't one.
+func relativeOf(full string) string {
+	relative, ok := strings.CutPrefix(full, pvsFullName(""))
+	if !ok {
+		return ""
+	}
+	return relative
+}

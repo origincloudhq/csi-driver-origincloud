@@ -19,7 +19,7 @@ The driver calls Origin Cloud's public REST API through
 | Identity service | Done |
 | Controller plugin: create, delete, attach, detach, topology | Done |
 | Node plugin: stage, publish, filesystem expansion, usage | Done |
-| Snapshots, restore, volume expansion | Not yet |
+| Snapshots, restore, volume expansion | Done |
 | Container image (`linux/amd64`, `linux/arm64`) | Done |
 | Install manifests (`deploy/`) | Done |
 
@@ -48,6 +48,37 @@ plugin on every node.
   `vdb`. It is informational only (see the node plugin below). A volume attached to another node is refused with
   `FAILED_PRECONDITION`, and so is a node in another zone.
 - **ControllerUnpublishVolume** detaches it again.
+- **Snapshot ID**: the PVS snapshot's resource name,
+  `projects/{project}/zones/{zone}/snapshots/{snapshot}`, in its volume's zone.
+- **CreateSnapshot** takes a PVS snapshot of the volume, waits for the copy,
+  and then **protects** it, because PVS creates a volume only from a protected
+  snapshot. The snapshot is ready to use once it is both copied and protected.
+  CreateSnapshot is idempotent by the CSI snapshot name, the same way
+  CreateVolume is, through the `csi.origincloud.eu/snapshot-name` tag and a
+  derived `request_id`. The API doesn't report a snapshot's creation time.
+  The driver records the time of its first request in the
+  `csi.origincloud.eu/created-at` tag and reports that.
+- **DeleteSnapshot** unprotects the snapshot and deletes it. PVS doesn't
+  flatten a restored volume, so it refuses to unprotect a snapshot while a
+  volume restored from it exists. Until those volumes are deleted,
+  DeleteSnapshot fails with `FAILED_PRECONDITION`, and Kubernetes retries it.
+- **ListSnapshots** lists the snapshot the snapshot ID names, or the source
+  volume's snapshots. Without either filter it lists the snapshots in
+  `--default-zone`, because the controller doesn't know every zone of the
+  cluster.
+- **CreateVolume from a snapshot** (a `dataSource` of kind `VolumeSnapshot`)
+  creates the volume in the snapshot's zone, the only zone PVS restores into.
+  It is refused with `RESOURCE_EXHAUSTED` when the requisite topology leaves
+  that zone out. The volume is at least the snapshot's size. A snapshot that
+  isn't protected is refused with `FAILED_PRECONDITION`. Cloning a volume
+  (a `dataSource` of kind `PersistentVolumeClaim`) isn't supported, because
+  PVS has no clone: snapshot the volume and restore the snapshot instead.
+- **ControllerExpandVolume** grows the volume, attached or not (online
+  expansion), to the requested size rounded up to whole GiB. Growing it to the
+  size it already has changes nothing. A smaller size is refused with
+  `OUT_OF_RANGE`, because a PVS volume never shrinks. A filesystem volume then
+  needs the node to grow its filesystem (`node_expansion_required`); a block
+  volume doesn't.
 - A call that has to wait for an operation waits until the CO's deadline. If
   the deadline passes first, the call fails with `DEADLINE_EXCEEDED`, and the
   CO's retry picks up the operation already under way.
@@ -108,8 +139,20 @@ metadata:
   name: origin-gp1
 provisioner: pvs.csi.origincloud.eu
 volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
 parameters:
   storageClass: //pvs.origincloudapis.eu/storageClasses/gp1
+```
+
+A `VolumeSnapshotClass` takes no parameters:
+
+```yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: origin-snapshots
+driver: pvs.csi.origincloud.eu
+deletionPolicy: Delete
 ```
 
 ### Errors
@@ -239,9 +282,9 @@ through the instance's metadata service. It reads no other credentials:
 no key file, no token in the environment, no Kubernetes secret. Give the
 instances that run the controller a service account bound to the built-in
 role `roles/pvs.csi-driver` on the cluster's project. That role allows
-exactly what the driver calls: volumes, snapshots, and attaching to and
-detaching from instances. The node plugin calls no API and needs no
-service account.
+exactly what the driver calls: volumes, snapshots (protecting and
+unprotecting them too), and attaching to and detaching from instances.
+The node plugin calls no API and needs no service account.
 
 ## Flags
 
