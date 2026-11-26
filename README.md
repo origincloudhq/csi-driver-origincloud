@@ -18,7 +18,7 @@ The driver calls Origin Cloud's public REST API through
 |---|---|
 | Identity service | Done |
 | Controller plugin: create, delete, attach, detach, topology | Done |
-| Node plugin: stage, publish, filesystem expansion | Not yet: `--mode=node` exits with an error |
+| Node plugin: stage, publish, filesystem expansion, usage | Done |
 | Snapshots, restore, volume expansion | Not yet |
 | Container image, manifests | Not yet |
 
@@ -43,13 +43,56 @@ plugin on every node.
 - **DeleteVolume** deletes the volume. A volume that doesn't exist is deleted
   already. A volume that is still attached is refused with `FAILED_PRECONDITION`.
 - **ControllerPublishVolume** attaches the volume to the node's instance. Its
-  publish context's `device` key names the device the guest sees it under,
-  such as `vdb`. A volume attached to another node is refused with
+  publish context's `device` key names the attachment's disk slot, such as
+  `vdb`. It is informational only (see the node plugin below). A volume attached to another node is refused with
   `FAILED_PRECONDITION`, and so is a node in another zone.
 - **ControllerUnpublishVolume** detaches it again.
 - A call that has to wait for an operation waits until the CO's deadline. If
   the deadline passes first, the call fails with `DEADLINE_EXCEEDED`, and the
   CO's retry picks up the operation already under way.
+
+### Node plugin
+
+The node plugin needs no API credentials. It reads its instance from the
+metadata service (`GET /origin/v1/instance`), and the controller does the
+attaching.
+
+- **NodeGetInfo**: the node ID is the instance's relative name, which is
+  what the controller takes. The topology is the instance's zone. A node
+  takes at most 24 volumes: an instance's disk slots run from `vda` to `vdz`,
+  `vdc` is reserved by the platform, and the boot disk is on `vda`.
+- **Finding the disk**: the guest names its disks in the order it finds them,
+  so a disk attached to a running instance often doesn't get the name the
+  attachment's `device` gives. The node plugin never uses that name. Every
+  volume's disk carries the volume's id (`vol-...`) as its serial, and the
+  plugin finds it as `/dev/disk/by-id/virtio-<volume id>`. Without udev's
+  links, it reads each disk's serial in `/sys/block/*/serial`. It waits up to
+  30 seconds for a freshly attached disk to show up. A disk that doesn't
+  show up is `NOT_FOUND`.
+- **NodeStageVolume** mounts a filesystem volume's disk at the staging path.
+  It creates the filesystem first only when the disk holds nothing at all,
+  neither a filesystem nor a partition table (as `blkid` reads it). A disk
+  that holds a filesystem of another type, or a partition table, is refused
+  with `FAILED_PRECONDITION` and never formatted. The filesystem is `ext4`
+  unless the StorageClass sets `csi.storage.k8s.io/fstype: xfs`. A block
+  volume has nothing to stage.
+- **NodePublishVolume** bind-mounts the staged filesystem at the target
+  path, or binds a block volume's disk onto a file there. A read-only publish
+  is a read-only bind. A `ReadWriteOncePod` (single-writer) volume is refused
+  at a second target path.
+- **NodeUnpublishVolume** and **NodeUnstageVolume** unmount, and unpublish
+  removes the target path. Each of the four calls is idempotent: a repeat
+  finds what the first one did and succeeds.
+- **NodeExpandVolume** grows the filesystem online (`resize2fs`,
+  `xfs_growfs`) to fill the disk once the controller expanded the volume,
+  and answers the disk's size as the guest sees it.
+- **NodeGetVolumeStats** reports a filesystem's bytes and inodes, or a block
+  volume's size.
+
+The node plugin runs privileged, with the node's `/dev` and the kubelet's
+directory mounted with bidirectional propagation, and needs `blkid`,
+`mkfs.ext4`, `mkfs.xfs`, `fsck`, `resize2fs`, `xfs_growfs` and `mount` in its
+image.
 
 ### StorageClass parameters
 
@@ -92,7 +135,8 @@ no key file, no token in the environment, no Kubernetes secret. Give the
 instances that run the controller a service account bound to the built-in
 role `roles/pvs.csi-driver` on the cluster's project. That role allows
 exactly what the driver calls: volumes, snapshots, and attaching to and
-detaching from instances.
+detaching from instances. The node plugin calls no API and needs no
+service account.
 
 ## Flags
 
@@ -101,7 +145,7 @@ detaching from instances.
 | `--mode` | | `controller` or `node` |
 | `--endpoint` | `unix:///csi/csi.sock` | Where to serve CSI: `unix:///path` or `tcp://host:port` |
 | `--project` | `$ORIGINCLOUD_PROJECT` | Controller: the project to create volumes in |
-| `--region` | `$ORIGINCLOUD_REGION` | The region whose API to call |
+| `--region` | `$ORIGINCLOUD_REGION` | Controller: the region whose API to call |
 | `--default-zone` | | Controller: the zone for a volume whose request names none |
 | `--version` | | Print the version and exit |
 
@@ -112,9 +156,11 @@ go test -race ./...
 ```
 
 The tests include the [csi-test](https://github.com/kubernetes-csi/csi-test)
-sanity suite's Identity and Controller tests. They run against the controller
-served on a socket, with an in-memory fake of the API behind it
-(`internal/cloud/fake`).
+sanity suite's Identity, Controller and Node tests. They run against both
+plugins, each served on its own socket. The controller has an in-memory fake
+of the API behind it (`internal/cloud/fake`). The node plugin has a fake of
+the node's mounts (`internal/mount/fake`), whose disks are the volumes the
+fake API holds attached to the node.
 
 ## License
 

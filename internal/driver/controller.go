@@ -18,8 +18,9 @@ import (
 const gib = int64(1) << 30
 
 // PublishContextDevice is the publish context key under which
-// ControllerPublishVolume tells the node plugin the device name the guest
-// sees the volume under, such as `vdb`.
+// ControllerPublishVolume names the attachment's disk slot, such as `vdb`.
+// It is informational: the guest names disks in the order it finds them,
+// so the node plugin finds the disk by its serial instead.
 const PublishContextDevice = "device"
 
 // ControllerGetCapabilities lists what the controller does. It advertises

@@ -2,18 +2,24 @@ package driver_test
 
 import (
 	"context"
+	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/google/uuid"
 	"github.com/kubernetes-csi/csi-test/v5/pkg/sanity"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/origincloudhq/csi-driver-origincloud/internal/cloud"
 	"github.com/origincloudhq/csi-driver-origincloud/internal/cloud/fake"
+	"github.com/origincloudhq/csi-driver-origincloud/internal/device"
 	"github.com/origincloudhq/csi-driver-origincloud/internal/driver"
-	"google.golang.org/grpc"
+	"github.com/origincloudhq/csi-driver-origincloud/internal/metadata"
+	mountfake "github.com/origincloudhq/csi-driver-origincloud/internal/mount/fake"
+	computev1beta1 "go.origincloud.eu/sdk/compute/v1beta1"
+	pvsv1beta1 "go.origincloud.eu/sdk/pvs/v1beta1"
 )
 
 const (
@@ -21,13 +27,11 @@ const (
 	sanityNode = "projects/p-sanity/zones/" + sanityZone + "/instances/i-sanity"
 )
 
-// TestSanity runs the csi-test sanity suite's Identity and Controller tests
-// against the controller plugin, served on a socket as in a cluster, with a
-// fake of the Origin Cloud API behind it.
-//
-// The suite's controller tests ask the node service for the node's ID and
-// topology; a stub answers that on a socket of its own. The Node Service
-// tests are skipped: the node plugin isn't part of this binary yet.
+// TestSanity runs the csi-test sanity suite against both plugins, each
+// served on a socket of its own as in a cluster: the controller with a fake
+// of the Origin Cloud API behind it, the node plugin with a fake of the
+// node's mounts. The node's disks are the volumes the fake API holds
+// attached to the node, so what the controller attaches the node finds.
 func TestSanity(t *testing.T) {
 	dir := t.TempDir()
 	controllerSock := filepath.Join(dir, "controller.sock")
@@ -45,6 +49,17 @@ func TestSanity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	n, err := driver.NewNode(driver.NodeConfig{
+		Version:      "sanity",
+		Metadata:     sanityMetadata{},
+		Mounter:      mountfake.New(),
+		Devices:      attachedDisks{cloud: f.Cloud(), node: sanityNode},
+		DeviceWait:   10 * time.Millisecond,
+		PollInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -52,18 +67,14 @@ func TestSanity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	served := make(chan error, 1)
+	served := make(chan error, 2)
 	go func() { served <- d.Serve(ctx, l) }()
 
 	nl, err := driver.Listen("unix://" + nodeSock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	nodeSrv := grpc.NewServer()
-	csi.RegisterIdentityServer(nodeSrv, d)
-	csi.RegisterNodeServer(nodeSrv, nodeStub{})
-	go func() { _ = nodeSrv.Serve(nl) }()
-	defer nodeSrv.Stop()
+	go func() { served <- n.Serve(ctx, nl) }()
 
 	cfg := sanity.NewTestConfig()
 	cfg.Address = "unix://" + nodeSock
@@ -77,13 +88,14 @@ func TestSanity(t *testing.T) {
 	sc := sanity.GinkgoTest(&cfg)
 	gomega.RegisterFailHandler(ginkgo.Fail)
 	suite, reporter := ginkgo.GinkgoConfiguration()
-	suite.SkipStrings = append(suite.SkipStrings, "Node Service")
 	ginkgo.RunSpecs(t, "csi-sanity", suite, reporter)
 	sc.Finalize()
 
 	cancel()
-	if err := <-served; err != nil {
-		t.Fatal(err)
+	for range 2 {
+		if err := <-served; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -100,29 +112,40 @@ func (idGen) GenerateUniqueValidNodeID() string {
 }
 func (idGen) GenerateInvalidNodeID() string { return "not-a-node" }
 
-// nodeStub answers what the controller tests ask a node: who it is and
-// where.
-type nodeStub struct {
-	csi.UnimplementedNodeServer
+// sanityMetadata is the metadata service of the sanity node.
+type sanityMetadata struct{}
+
+func (sanityMetadata) Instance(context.Context) (metadata.Instance, error) {
+	return metadata.Instance{Name: "//compute.origincloudapis.eu/" + sanityNode, Zone: sanityZone}, nil
 }
 
-func (nodeStub) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
-	return &csi.NodeGetInfoResponse{
-		NodeId:             sanityNode,
-		AccessibleTopology: &csi.Topology{Segments: map[string]string{driver.TopologyZoneKey: sanityZone}},
-	}, nil
+// attachedDisks are the node's disks: one for each volume the fake API
+// holds attached to the node, named by the volume's id, as large as the
+// volume.
+type attachedDisks struct {
+	cloud cloud.Cloud
+	node  string
 }
 
-func (nodeStub) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
-	return &csi.NodeGetCapabilitiesResponse{}, nil
+func (a attachedDisks) Find(volumeID string) (string, error) {
+	for att, err := range a.cloud.Attachments.AllVolumeAttachments(context.Background(), &computev1beta1.ListVolumeAttachmentsRequest{Parent: a.node}) {
+		if err != nil {
+			return "", err
+		}
+		if att.GetState() == computev1beta1.VolumeAttachment_ATTACHED && path.Base(att.GetVolume()) == volumeID {
+			return "/dev/disk/by-id/virtio-" + volumeID, nil
+		}
+	}
+	return "", device.ErrNotFound
 }
 
-// The suite's cleanup unpublishes and unstages on the node whatever it
-// published; with no node plugin there is nothing to undo.
-func (nodeStub) NodeUnpublishVolume(context.Context, *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
-	return &csi.NodeUnpublishVolumeResponse{}, nil
-}
-
-func (nodeStub) NodeUnstageVolume(context.Context, *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
-	return &csi.NodeUnstageVolumeResponse{}, nil
+func (a attachedDisks) Size(dev string) (int64, error) {
+	id := strings.TrimPrefix(dev, "/dev/disk/by-id/virtio-")
+	vol, err := a.cloud.Volumes.GetVolume(context.Background(), &pvsv1beta1.GetVolumeRequest{
+		Name: "projects/p-sanity/zones/" + sanityZone + "/volumes/" + id,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return int64(vol.GetSizeGib()) << 30, nil
 }

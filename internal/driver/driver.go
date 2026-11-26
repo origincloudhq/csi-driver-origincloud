@@ -1,7 +1,8 @@
 // Package driver implements the CSI services of the Origin CSI driver,
-// pvs.csi.origincloud.eu: Identity, and the controller plugin, which
+// pvs.csi.origincloud.eu: Identity; the controller plugin (Driver), which
 // creates and deletes PVS volumes and attaches them to and detaches them
-// from the instances that are the cluster's nodes.
+// from the instances that are the cluster's nodes; and the node plugin
+// (Node), which formats and mounts an attached volume on its node.
 package driver
 
 import (
@@ -51,7 +52,7 @@ type Config struct {
 
 // Driver serves the CSI Identity and Controller services.
 type Driver struct {
-	csi.UnimplementedIdentityServer
+	identity
 	csi.UnimplementedControllerServer
 
 	cfg Config
@@ -74,5 +75,5 @@ func New(cfg Config) (*Driver, error) {
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
-	return &Driver{cfg: cfg}, nil
+	return &Driver{identity: identity{version: cfg.Version}, cfg: cfg}, nil
 }
