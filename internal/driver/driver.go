@@ -1,8 +1,9 @@
 // Package driver implements the CSI services of the Origin CSI driver,
 // pvs.csi.origincloud.eu: Identity; the controller plugin (Driver), which
-// creates and deletes PVS volumes and attaches them to and detaches them
-// from the instances that are the cluster's nodes; and the node plugin
-// (Node), which formats and mounts an attached volume on its node.
+// creates, grows and deletes PVS volumes, attaches them to and detaches
+// them from the instances that are the cluster's nodes, and takes,
+// restores from and deletes their snapshots; and the node plugin (Node),
+// which formats, mounts and grows an attached volume on its node.
 package driver
 
 import (
@@ -32,6 +33,13 @@ const (
 	tagVolumeName = "csi.origincloud.eu/volume-name"
 	// tagCreatedBy marks the volumes the driver created.
 	tagCreatedBy = "csi.origincloud.eu/created-by"
+	// tagSnapshotName is the tag a snapshot the driver took carries its
+	// CSI snapshot name in. CreateSnapshot finds an earlier attempt's
+	// snapshot by it.
+	tagSnapshotName = "csi.origincloud.eu/snapshot-name"
+	// tagCreatedAt is the time, RFC 3339, the driver first asked for a
+	// snapshot: its CSI creation time, which the API doesn't report.
+	tagCreatedAt = "csi.origincloud.eu/created-at"
 )
 
 // Config configures the driver.
@@ -66,7 +74,7 @@ func New(cfg Config) (*Driver, error) {
 	if cfg.DefaultZone != "" && !segment(cfg.DefaultZone) {
 		return nil, fmt.Errorf("the default zone must be a zone code, got %q", cfg.DefaultZone)
 	}
-	if cfg.Cloud.Volumes == nil || cfg.Cloud.Instances == nil || cfg.Cloud.Attachments == nil {
+	if cfg.Cloud.Volumes == nil || cfg.Cloud.Snapshots == nil || cfg.Cloud.Instances == nil || cfg.Cloud.Attachments == nil {
 		return nil, fmt.Errorf("the driver needs a cloud")
 	}
 	if cfg.PollInterval == 0 {
