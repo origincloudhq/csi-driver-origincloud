@@ -1,0 +1,141 @@
+# The node plugin on every node: it finds an attached volume's disk, creates
+# its filesystem and mounts it for the pod. It calls no API and holds no
+# credential; it reads its instance and zone from the metadata service, which
+# answers only an instance's own address, hence the node's network
+# (hostNetwork).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: origincloud-csi-node
+# Neither the driver nor node-driver-registrar calls the Kubernetes API.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: origincloud-csi-node
+  labels:
+    app.kubernetes.io/name: origincloud-csi-node
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: origincloud-csi-node
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: origincloud-csi-node
+        app.kubernetes.io/component: node
+    spec:
+      serviceAccountName: origincloud-csi-node
+      automountServiceAccountToken: false
+      priorityClassName: system-node-critical
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/os: linux
+      # Every node that can run a pod with a volume needs the plugin,
+      # whatever its taints.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: driver
+          image: ghcr.io/origincloudhq/csi-driver-origincloud:v0.1.0
+          args:
+            - --mode=node
+            - --endpoint=unix:///csi/csi.sock
+          ports:
+            - name: healthz
+              containerPort: 29653
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          # Formatting and mounting disks takes a privileged container, and
+          # the mounts must reach the host (Bidirectional).
+          securityContext:
+            privileged: true
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: plugin-dir
+              mountPath: /csi
+            - name: device-dir
+              mountPath: /dev
+              mountPropagation: Bidirectional
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.18.1
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/pvs.csi.origincloud.eu/csi.sock
+            - --v=2
+          livenessProbe:
+            exec:
+              command:
+                - /csi-node-driver-registrar
+                - --kubelet-registration-path=/var/lib/kubelet/plugins/pvs.csi.origincloud.eu/csi.sock
+                - --mode=kubelet-registration-probe
+            initialDelaySeconds: 30
+            periodSeconds: 90
+            timeoutSeconds: 15
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.20.1
+          args:
+            - --csi-address=/csi/csi.sock
+            # On the node's network: a port other CSI drivers' probes
+            # (9808) don't take.
+            - --health-port=29653
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+          securityContext: *restricted
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      volumes:
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/pvs.csi.origincloud.eu
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: device-dir
+          hostPath:
+            path: /dev
+            type: Directory

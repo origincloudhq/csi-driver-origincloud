@@ -1,0 +1,34 @@
+# Installs the Origin CSI driver, pvs.csi.origincloud.eu, on a Kubernetes
+# cluster running on Origin Cloud instances:
+#
+#   kubectl apply -k deploy/      (after setting the project, see README)
+#
+# The VolumeSnapshot CRDs and the snapshot-controller are a prerequisite and
+# not part of this; see the README's install section.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kube-system
+
+resources:
+  - csidriver.yaml
+  - controller-rbac.yaml
+  - controller.yaml
+  - node.yaml
+  - storageclasses.yaml
+  - volumesnapshotclass.yaml
+
+# The controller's settings. Only the project is required: the one the
+# cluster's instances run in, where the driver creates volumes. Set it in an
+# overlay (see README) rather than here. The region is optional: empty, the
+# API's regionless endpoint is used.
+configMapGenerator:
+  - name: origincloud-csi-controller
+    literals:
+      - ORIGINCLOUD_PROJECT=
+      - ORIGINCLOUD_REGION=
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: origincloud-csi-driver
+    includeSelectors: false

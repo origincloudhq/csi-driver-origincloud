@@ -1,0 +1,54 @@
+# Checks the install manifests in deploy/ on every pull request and every
+# push to main: they render with kustomize, every object is valid against
+# the Kubernetes and snapshot CRD schemas (kubeconform), no object is a
+# Secret or carries a credential, and every image is pinned.
+name: Manifests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manifests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: 'actions/checkout@v4'
+
+      - name: kubeconform
+        run: |
+          curl -fsSLo kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf kubeconform.tar.gz -C "${RUNNER_TEMP}/bin" kubeconform
+          rm kubeconform.tar.gz
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+
+      - name: PyYAML
+        run: python3 -c 'import yaml' || { sudo apt-get update && sudo apt-get install -y python3-yaml; }
+
+      - name: The credential check refuses credentials
+        run: |
+          if python3 hack/check_no_credentials.py hack/testdata/credentials.yaml 2>report.txt; then
+            echo "the check passed manifests full of credentials"; exit 1
+          fi
+          cat report.txt
+          # One report per way a credential can get in (7), and the total.
+          test "$(grep -c '' report.txt)" -eq 8
+
+      - name: Render and check deploy/
+        run: hack/check-manifests.sh
