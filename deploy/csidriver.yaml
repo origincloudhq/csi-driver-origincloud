@@ -1,0 +1,13 @@
+# The driver as Kubernetes knows it. A PVS volume is attached to the node's
+# instance by the controller (attachRequired), and the kubelet changes a
+# filesystem's ownership to a pod's fsGroup (File).
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: pvs.csi.origincloud.eu
+spec:
+  attachRequired: true
+  podInfoOnMount: false
+  fsGroupPolicy: File
+  volumeLifecycleModes:
+    - Persistent

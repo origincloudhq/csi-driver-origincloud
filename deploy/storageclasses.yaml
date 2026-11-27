@@ -1,0 +1,22 @@
+# One StorageClass per PVS storage class that can be selected today (the
+# catalog's `available: true`; `origin pvs list-storage-classes`). Only gp1
+# is: st1 and io1 are published but refused with PRODUCT_UNAVAILABLE, so a
+# StorageClass for them would only make claims that never provision. Add
+# theirs here once they're available.
+#
+# gp1 is the platform's default class and this cluster's default
+# StorageClass. To keep another default, remove the annotation in an
+# overlay.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: origin-gp1
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: pvs.csi.origincloud.eu
+parameters:
+  storageClass: //pvs.origincloudapis.eu/storageClasses/gp1
+  csi.storage.k8s.io/fstype: ext4
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete

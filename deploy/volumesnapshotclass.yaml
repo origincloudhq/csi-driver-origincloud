@@ -1,0 +1,10 @@
+# Snapshots of the driver's volumes. Needs the VolumeSnapshot CRDs and the
+# snapshot-controller, which aren't part of these manifests (see README).
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: origin-snapshots
+  annotations:
+    snapshot.storage.kubernetes.io/is-default-class: "true"
+driver: pvs.csi.origincloud.eu
+deletionPolicy: Delete

@@ -1,0 +1,169 @@
+# The controller plugin, beside the CSI sidecars that drive it: the
+# external-provisioner (create and delete volumes, in the zone of the node a
+# pod is scheduled to), external-attacher, external-resizer and
+# external-snapshotter, and the liveness probe.
+#
+# The driver authenticates as the service account of the instance the pod
+# runs on, through the instance's metadata service. The metadata service
+# answers only an instance's own address, so the pod uses the node's network
+# (hostNetwork): from a pod address it would get no answer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: origincloud-csi-controller
+  labels:
+    app.kubernetes.io/name: origincloud-csi-controller
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: origincloud-csi-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: origincloud-csi-controller
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: origincloud-csi-controller
+      priorityClassName: system-cluster-critical
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: driver
+          image: ghcr.io/origincloudhq/csi-driver-origincloud:v0.1.0
+          args:
+            - --mode=controller
+            - --endpoint=unix:///csi/csi.sock
+          # ORIGINCLOUD_PROJECT and ORIGINCLOUD_REGION; no credential.
+          envFrom:
+            - configMapRef:
+                name: origincloud-csi-controller
+          ports:
+            - name: healthz
+              containerPort: 29652
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.4.1
+          args:
+            # Topology is on by default since v5: with WaitForFirstConsumer,
+            # the first preferred topology is the zone of the pod's node.
+            - --csi-address=/csi/csi.sock
+            - --default-fstype=ext4
+            - --timeout=120s
+            - --leader-election
+            - --leader-election-namespace=$(NAMESPACE)
+            - --v=2
+          env: &namespace
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          securityContext: *restricted
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.13.1
+          args:
+            - --csi-address=/csi/csi.sock
+            - --timeout=120s
+            - --leader-election
+            - --leader-election-namespace=$(NAMESPACE)
+            - --v=2
+          env: *namespace
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          securityContext: *restricted
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v2.3.1
+          args:
+            - --csi-address=/csi/csi.sock
+            - --timeout=120s
+            - --leader-election
+            - --leader-election-namespace=$(NAMESPACE)
+            - --v=2
+          env: *namespace
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          securityContext: *restricted
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+        - name: csi-snapshotter
+          image: registry.k8s.io/sig-storage/csi-snapshotter:v8.7.1
+          args:
+            - --csi-address=/csi/csi.sock
+            - --timeout=120s
+            - --leader-election
+            - --leader-election-namespace=$(NAMESPACE)
+            - --v=2
+          env: *namespace
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          securityContext: *restricted
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.20.1
+          args:
+            - --csi-address=/csi/csi.sock
+            # On the node's network: a port other CSI drivers' probes
+            # (9808) don't take.
+            - --health-port=29652
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+          securityContext: *restricted
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

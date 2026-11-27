@@ -21,7 +21,7 @@ The driver calls Origin Cloud's public REST API through
 | Node plugin: stage, publish, filesystem expansion, usage | Done |
 | Snapshots, restore, volume expansion | Not yet |
 | Container image (`linux/amd64`, `linux/arm64`) | Done |
-| Manifests | Not yet |
+| Install manifests (`deploy/`) | Done |
 
 ## How it works
 
@@ -128,6 +128,94 @@ The API's error reasons map to these gRPC codes:
 | `PRODUCT_UNAVAILABLE`, `PAYMENT_METHOD_REQUIRED`, `LEGAL_ACCEPTANCE_REQUIRED` | `FAILED_PRECONDITION` |
 | anything else | `INTERNAL` |
 
+## Install
+
+`deploy/` installs the driver on a Kubernetes cluster whose nodes are Origin
+Cloud instances, as plain YAML with a `kustomization.yaml`:
+
+| Object | What it is |
+|---|---|
+| `CSIDriver` `pvs.csi.origincloud.eu` | `attachRequired: true`, `podInfoOnMount: false`, `fsGroupPolicy: File` |
+| `Deployment` `origincloud-csi-controller` | The controller plugin with the external-provisioner, -attacher, -resizer and -snapshotter sidecars and the liveness probe; one replica, the sidecars elect a leader |
+| `DaemonSet` `origincloud-csi-node` | The node plugin with node-driver-registrar and the liveness probe on every node, whatever its taints |
+| RBAC | A ClusterRole per sidecar, from upstream's, and a Role for their leader-election leases |
+| `StorageClass` `origin-gp1` | PVS class `gp1`, the cluster's default: `WaitForFirstConsumer`, `allowVolumeExpansion: true`, `reclaimPolicy: Delete`, `ext4` |
+| `VolumeSnapshotClass` `origin-snapshots` | The default snapshot class, `deletionPolicy: Delete` |
+
+Everything goes to `kube-system`. Every image is pinned: the driver to a
+release of this repository, the sidecars to kubernetes-csi releases.
+
+There is a `StorageClass` for each PVS storage class that can be selected
+today (`origin pvs list-storage-classes`, `available: true`). Only `gp1` can
+be: `st1` and `io1` are published but refused, and get theirs once they're
+available.
+
+### Prerequisites
+
+- **The nodes' service account.** The controller authenticates as the
+  service account of the instance it runs on (see [Credentials](#credentials)).
+  Bind `roles/pvs.csi-driver` on the cluster's project to the service
+  account the nodes run as. The manifests hold no credential and no
+  `Secret`, and CI fails if one appears.
+- **The VolumeSnapshot CRDs and the snapshot-controller**, for snapshots.
+  They are cluster-wide and often installed already, so they aren't part of
+  `deploy/`. Without them, the `VolumeSnapshotClass` is refused and the
+  snapshotter sidecar keeps restarting. From kubernetes-csi:
+
+  ```sh
+  kubectl apply -k 'https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.7.1'
+  kubectl apply -k 'https://github.com/kubernetes-csi/external-snapshotter/deploy/kubernetes/snapshot-controller?ref=v8.7.1'
+  ```
+
+### Install with kustomize
+
+The controller needs the project the cluster's instances run in, where it
+creates the volumes. Set it in an overlay, a directory with this
+`kustomization.yaml`:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/origincloudhq/csi-driver-origincloud/deploy?ref=v0.1.0
+configMapGenerator:
+  - name: origincloud-csi-controller
+    namespace: kube-system
+    behavior: merge
+    literals:
+      - ORIGINCLOUD_PROJECT=my-project
+      # Optional: the region whose API to call. Empty, the regionless one.
+      # - ORIGINCLOUD_REGION=eu-central1
+```
+
+```sh
+kubectl apply -k ./my-overlay
+kubectl -n kube-system rollout status deployment/origincloud-csi-controller
+kubectl -n kube-system rollout status daemonset/origincloud-csi-node
+```
+
+Without the project, the controller exits with `the project must be a
+project id`. An overlay is also where to drop the default-class
+annotations, add tolerations or change resources.
+
+Both the controller and the node plugin use the node's network
+(`hostNetwork`): the metadata service, which the controller gets its
+credentials from and the node plugin its instance and zone, answers only an
+instance's own address. Their liveness probes take ports `29652`
+(controller) and `29653` (node) on the node.
+
+### Check the manifests
+
+```sh
+hack/check-manifests.sh
+```
+
+renders `deploy/` and checks it as the `Manifests` workflow does: every
+object against the Kubernetes and snapshot CRD schemas with
+[kubeconform](https://github.com/yannh/kubeconform), no `Secret` and no
+credential in any object (`hack/check_no_credentials.py`), and every image
+pinned. It needs `kubectl`, `kubeconform` and Python with PyYAML.
+
 ## Image
 
 The driver ships as one multi-arch image (`linux/amd64`, `linux/arm64`) for
@@ -195,7 +283,10 @@ pull request, for each architecture on a runner of that architecture.
 ## Releases
 
 A release is a version tag on `main`, `vMAJOR.MINOR.PATCH` (a pre-release
-such as `v0.2.0-rc.1` works too):
+such as `v0.2.0-rc.1` works too). First set the driver's image in
+`deploy/controller.yaml` and `deploy/node.yaml`, and the `?ref=` in the
+install section, to the new version, and merge that: the manifests at a tag
+install that tag's image. Then tag:
 
 ```sh
 git switch main && git pull
