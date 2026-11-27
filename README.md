@@ -20,7 +20,8 @@ The driver calls Origin Cloud's public REST API through
 | Controller plugin: create, delete, attach, detach, topology | Done |
 | Node plugin: stage, publish, filesystem expansion, usage | Done |
 | Snapshots, restore, volume expansion | Not yet |
-| Container image, manifests | Not yet |
+| Container image (`linux/amd64`, `linux/arm64`) | Done |
+| Manifests | Not yet |
 
 ## How it works
 
@@ -127,6 +128,22 @@ The API's error reasons map to these gRPC codes:
 | `PRODUCT_UNAVAILABLE`, `PAYMENT_METHOD_REQUIRED`, `LEGAL_ACCEPTANCE_REQUIRED` | `FAILED_PRECONDITION` |
 | anything else | `INTERNAL` |
 
+## Image
+
+The driver ships as one multi-arch image (`linux/amd64`, `linux/arm64`) for
+both plugins:
+
+```
+ghcr.io/origincloudhq/csi-driver-origincloud:<version>
+```
+
+such as `ghcr.io/origincloudhq/csi-driver-origincloud:v0.1.0`. There is no
+`latest` tag: pin a version. The image holds the static binary as its
+entrypoint, on a Debian slim base with the tools the node plugin runs
+(`blkid`, `mkfs.ext4`, `mkfs.xfs`, `fsck`, `resize2fs`, `xfs_growfs`,
+`mount`, `umount`). `GetPluginInfo` and `--version` answer the image's
+version.
+
 ## Credentials
 
 The driver authenticates as the service account of the instance it runs on,
@@ -161,6 +178,39 @@ plugins, each served on its own socket. The controller has an in-memory fake
 of the API behind it (`internal/cloud/fake`). The node plugin has a fake of
 the node's mounts (`internal/mount/fake`), whose disks are the volumes the
 fake API holds attached to the node.
+
+To build and check the image locally:
+
+```sh
+docker build --build-arg VERSION=v0.0.0-dev -t csi-driver-origincloud:dev .
+go mod download
+hack/smoke-test-image.sh csi-driver-origincloud:dev v0.0.0-dev
+```
+
+`hack/smoke-test-image.sh` checks that every tool the node plugin runs is on
+the image's `PATH`, and that the image starts with `--mode=node` and answers
+`GetPluginInfo` with the given version. The `Image` workflow runs it on every
+pull request, for each architecture on a runner of that architecture.
+
+## Releases
+
+A release is a version tag on `main`, `vMAJOR.MINOR.PATCH` (a pre-release
+such as `v0.2.0-rc.1` works too):
+
+```sh
+git switch main && git pull
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The tag's `Image` workflow builds and checks both architectures, then pushes
+the multi-arch image to `ghcr.io/origincloudhq/csi-driver-origincloud:v0.1.0`
+and checks that its manifest list holds both. The version in the image,
+`GetPluginInfo` and `--version`, is the tag. To look at a published release:
+
+```sh
+docker buildx imagetools inspect ghcr.io/origincloudhq/csi-driver-origincloud:v0.1.0
+```
 
 ## License
 
