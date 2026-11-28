@@ -31,10 +31,11 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM debian:trixie-slim
 
+# ca-certificates: the trust store for the TLS calls to the Origin Cloud APIs;
 # util-linux: blkid (and fsck); mount: mount, umount;
 # e2fsprogs: mkfs.ext4, resize2fs, e2fsck; xfsprogs: mkfs.xfs, xfs_growfs.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends e2fsprogs mount util-linux xfsprogs \
+ && apt-get install -y --no-install-recommends ca-certificates e2fsprogs mount util-linux xfsprogs \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/origincloud-csi-driver /usr/local/bin/origincloud-csi-driver

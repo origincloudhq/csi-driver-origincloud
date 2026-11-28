@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Checks a built image: every tool the node plugin runs is on its PATH, and
-# the driver starts with --mode=node and answers GetPluginInfo with the
-# expected name and version.
+# Checks a built image: every tool the node plugin runs is on its PATH, the
+# image has a CA trust store for the API's TLS, and the driver starts with
+# --mode=node and answers GetPluginInfo with the expected name and version.
 #
 # Usage: hack/smoke-test-image.sh <image> <expected version>
 #
@@ -24,6 +24,10 @@ docker run --rm --entrypoint /bin/sh "${image}" -c '
   done
   exit "${missing}"
 ' || fail "a tool is missing from the image"
+
+echo "--- CA certificates"
+docker run --rm --entrypoint /bin/sh "${image}" -c 'test -s /etc/ssl/certs/ca-certificates.crt' \
+  || fail "the image has no CA certificates"
 
 echo "--- --version"
 got="$(docker run --rm "${image}" --version)"
