@@ -44,7 +44,7 @@ spec:
         - operator: Exists
       containers:
         - name: driver
-          image: ghcr.io/origincloudhq/csi-driver-origincloud:v0.1.0
+          image: ghcr.io/origincloudhq/csi-driver-origincloud:v0.1.1
           args:
             - --mode=node
             - --endpoint=unix:///csi/csi.sock

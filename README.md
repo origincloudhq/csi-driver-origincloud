@@ -220,7 +220,7 @@ creates the volumes. Set it in an overlay, a directory with this
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - https://github.com/origincloudhq/csi-driver-origincloud/deploy?ref=v0.1.0
+  - https://github.com/origincloudhq/csi-driver-origincloud/deploy?ref=v0.1.1
 configMapGenerator:
   - name: origincloud-csi-controller
     namespace: kube-system
